@@ -1,6 +1,4 @@
-from collections import deque
-
-from serial_protocol import parse_absorbance_frame, parse_frames
+import math
 
 
 WAVELENGTH_CODES = {
@@ -22,8 +20,144 @@ WAVELENGTH_COLORS = {
 }
 
 ZERO_VALUE_EPSILON = 1e-7
-STABLE_COUNT = 10
-STABLE_RANGE = 0.005
+
+
+def channel_gain_calibration(
+    baseline_values: list[float | None],
+    target_indices: list[int],
+    channel_index: int,
+):
+    """按所选通道空气基底算术平均值计算当前通道的强度校准系数。"""
+    selected_baselines = [baseline_values[idx] for idx in target_indices]
+    if (
+        not selected_baselines
+        or any(value is None or value <= ZERO_VALUE_EPSILON for value in selected_baselines)
+        or channel_index not in target_indices
+    ):
+        return None
+
+    air_mean = sum(selected_baselines) / len(selected_baselines)
+    channel_baseline = baseline_values[channel_index]
+    return air_mean, air_mean / channel_baseline
+
+
+def calibrate_intensity(value: float, calibration_factor: float):
+    """使用插片时冻结的通道增益系数校准滤光片稳定强度。"""
+    return value * calibration_factor
+
+
+def absorbance_from_transmittance(transmittance: float):
+    """按 A=-log10(T) 将透过率比例转换为吸光度。"""
+    if transmittance <= 0:
+        return None
+    return -math.log10(transmittance)
+
+
+def window_diagnostics(values: list[float], baseline: float):
+    """计算空气和滤光片判稳共用的归一化窗口指标。"""
+    sample_count = len(values)
+    if not values or baseline <= ZERO_VALUE_EPSILON:
+        return {
+            "sample_count": sample_count,
+            "ratio_sample_std": None,
+            "ratio_cv": None,
+            "ratio_range": None,
+            "ratio_slope_per_frame": None,
+        }
+
+    ratios = [value / baseline for value in values]
+    ratio_mean = sum(ratios) / sample_count
+    ratio_range = max(ratios) - min(ratios)
+
+    if sample_count < 2:
+        ratio_sample_std = None
+        ratio_cv = None
+        ratio_slope = None
+    else:
+        ratio_sample_std = (
+            sum((ratio - ratio_mean) ** 2 for ratio in ratios) / (sample_count - 1)
+        ) ** 0.5
+        ratio_cv = ratio_sample_std / abs(ratio_mean) if ratio_mean else None
+
+        frame_mean = (sample_count - 1) / 2
+        slope_divisor = sum((frame - frame_mean) ** 2 for frame in range(sample_count))
+        ratio_slope = (
+            sum((frame - frame_mean) * (ratio - ratio_mean) for frame, ratio in enumerate(ratios))
+            / slope_divisor
+        )
+
+    return {
+        "sample_count": sample_count,
+        "ratio_sample_std": ratio_sample_std,
+        "ratio_cv": ratio_cv,
+        "ratio_range": ratio_range,
+        "ratio_slope_per_frame": ratio_slope,
+    }
+
+
+def air_window_is_stable(
+    values: list[float],
+    baseline: float | None,
+    cv_limit: float,
+    slope_limit: float,
+    range_limit: float,
+    required_count: int,
+):
+    """按归一化 CV、斜率和极差判断空气窗口是否稳定。"""
+    if len(values) < required_count:
+        return False
+
+    reference_baseline = baseline
+    if reference_baseline is None:
+        reference_baseline = sum(values) / len(values)
+    if reference_baseline <= ZERO_VALUE_EPSILON:
+        return False
+
+    diagnostics = window_diagnostics(values, reference_baseline)
+    ratio_cv = diagnostics["ratio_cv"]
+    ratio_slope = diagnostics["ratio_slope_per_frame"]
+    ratio_range = diagnostics["ratio_range"]
+    return (
+        ratio_cv is not None
+        and ratio_slope is not None
+        and ratio_range is not None
+        and ratio_cv <= cv_limit
+        and abs(ratio_slope) <= slope_limit
+        and ratio_range <= range_limit
+    )
+
+
+def filter_window_is_stable(
+    values: list[float],
+    baseline: float,
+    cv_limit: float,
+    slope_limit: float,
+    range_limit: float,
+    required_count: int,
+):
+    """按透过率 CV、斜率和极差判断滤光片窗口是否稳定。"""
+    if len(values) < required_count or baseline <= ZERO_VALUE_EPSILON:
+        return False
+
+    diagnostics = window_diagnostics(values, baseline)
+    ratio_cv = diagnostics["ratio_cv"]
+    ratio_slope = diagnostics["ratio_slope_per_frame"]
+    ratio_range = diagnostics["ratio_range"]
+    return (
+        ratio_cv is not None
+        and ratio_slope is not None
+        and ratio_range is not None
+        and ratio_cv <= cv_limit
+        and abs(ratio_slope) <= slope_limit
+        and ratio_range <= range_limit
+    )
+
+
+def filter_is_inserted(value: float, baseline: float, air_tolerance: float):
+    """透过率低于空气范围下限时，判定为滤光片已插入。"""
+    if value <= ZERO_VALUE_EPSILON or baseline <= ZERO_VALUE_EPSILON:
+        return False
+    return value / baseline < 1.0 - air_tolerance
 
 
 def channel_indices(channel_group: int):
@@ -40,55 +174,3 @@ def channel_group_label(channel_group: int):
     if channel_group == 2:
         return "CH13-CH24"
     return "CH1-CH24"
-
-
-def collect_air_baseline(ser, target_indices: list[int]):
-    buffer = bytearray()
-    baseline_windows = [deque(maxlen=STABLE_COUNT) for _ in range(24)]
-    baseline_values = [None for _ in range(24)]
-    last_done_count = -1
-
-    print(f"空气基底采集中: 0/{len(target_indices)}", end="")
-    while True:
-        data = ser.read(4096)
-        if data:
-            buffer.extend(data)
-
-        for frame in parse_frames(buffer):
-            values = parse_absorbance_frame(frame)
-            if values is None:
-                continue
-
-            for idx in target_indices:
-                if baseline_values[idx] is not None:
-                    continue
-
-                value = values[idx]
-                if value <= ZERO_VALUE_EPSILON:
-                    baseline_windows[idx].clear()
-                    continue
-
-                baseline_windows[idx].append(value)
-                if len(baseline_windows[idx]) < STABLE_COUNT:
-                    continue
-
-                baseline_range = max(baseline_windows[idx]) - min(baseline_windows[idx])
-                if baseline_range < STABLE_RANGE:
-                    baseline_values[idx] = round(sum(baseline_windows[idx]) / STABLE_COUNT, 6)
-
-            done_count = sum(baseline_values[idx] is not None for idx in target_indices)
-            if done_count != last_done_count:
-                print(f"\r空气基底采集中: {done_count}/{len(target_indices)}", end="")
-                last_done_count = done_count
-
-            if done_count == len(target_indices):
-                print()
-                return baseline_values
-
-
-def print_air_baseline_summary(baseline_values: list[float | None], target_indices: list[int]):
-    print("空气基底完成:")
-    for idx in target_indices:
-        value = baseline_values[idx]
-        if value is not None:
-            print(f"CH{idx + 1}: {value:.6f}")

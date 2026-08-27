@@ -7,14 +7,22 @@ from app_paths import get_app_dir
 CONFIG_FILE_NAME = "config.ini"
 
 DEFAULT_OPTIONS = {
-    "port": "COM6",
+    "port": "",
     "wavelength": 520,
     "channel_group": 0,
+    "test_mode": "filter",
     "output": "串口数据记录.xlsx",
     "stable_output": "滤光片稳定值.xlsx",
-    "filter_ratio": None,
-    "ratio_tolerance": 5.0,
+    "filter_stable_window_frames": 10,
+    "filter_stable_cv_limit": 0.25,
+    "filter_stable_slope_limit": 0.02,
+    "filter_stable_range_limit": 0.25,
     "air_tolerance": 5.0,
+    "air_warmup_seconds": 30.0,
+    "air_stable_window_frames": 20,
+    "air_stable_cv_limit": 0.25,
+    "air_stable_slope_limit": 0.03,
+    "air_stable_range_limit": 0.50,
     "no_start": False,
     "keep_light": False,
 }
@@ -39,7 +47,15 @@ def load_config(path: str):
     if not parser.has_section("settings"):
         return {}
 
-    return {key.replace("-", "_"): value for key, value in parser.items("settings")}
+    values = {key.replace("-", "_"): value for key, value in parser.items("settings")}
+    if "test_mode" not in values and "filter_ratio" in values:
+        try:
+            values["test_mode"] = "air" if int(values["filter_ratio"]) == 0 else "filter"
+        except ValueError:
+            pass
+    values.pop("filter_ratio", None)
+    values.pop("ratio_tolerance", None)
+    return values
 
 
 def merge_config(args, parser):
@@ -47,7 +63,7 @@ def merge_config(args, parser):
     config_values = load_config(config_path)
 
     for name, default_value in DEFAULT_OPTIONS.items():
-        cli_value = getattr(args, name)
+        cli_value = getattr(args, name, None)
         if cli_value is not None:
             value = cli_value
         elif name in config_values:
@@ -65,12 +81,28 @@ def merge_config(args, parser):
 
 def convert_config_value(name: str, value: str, parser):
     try:
-        if name in ("wavelength", "channel_group", "filter_ratio"):
+        if name in (
+            "wavelength",
+            "channel_group",
+            "filter_stable_window_frames",
+            "air_stable_window_frames",
+        ):
             return int(value)
-        if name in ("ratio_tolerance", "air_tolerance"):
+        if name in (
+            "filter_stable_cv_limit",
+            "filter_stable_slope_limit",
+            "filter_stable_range_limit",
+            "air_tolerance",
+            "air_warmup_seconds",
+            "air_stable_cv_limit",
+            "air_stable_slope_limit",
+            "air_stable_range_limit",
+        ):
             return float(value)
         if name in ("no_start", "keep_light"):
             return parse_bool(value)
+        if name == "test_mode":
+            return value.strip().lower()
     except ValueError:
         parser.error(f"config.ini 中 {name} 的值无效: {value}")
 
@@ -91,5 +123,25 @@ def validate_args(args, parser):
         parser.error("wavelength 必须是 410/460/520/550/590/630")
     if args.channel_group not in (0, 1, 2):
         parser.error("channel_group 必须是 0/1/2")
-    if args.filter_ratio not in (0, 10, 20, 30):
-        parser.error("filter_ratio 必须在 config.ini 中设置为 0/10/20/30")
+    if args.test_mode not in ("air", "filter"):
+        parser.error("test_mode 必须是 air 或 filter")
+    if args.filter_stable_window_frames < 2:
+        parser.error("filter_stable_window_frames 必须大于等于 2")
+    if args.filter_stable_cv_limit < 0:
+        parser.error("filter_stable_cv_limit 不能小于 0")
+    if args.filter_stable_slope_limit < 0:
+        parser.error("filter_stable_slope_limit 不能小于 0")
+    if args.filter_stable_range_limit < 0:
+        parser.error("filter_stable_range_limit 不能小于 0")
+    if not 0 <= args.air_tolerance < 100:
+        parser.error("air_tolerance 必须大于等于 0 且小于 100")
+    if args.air_warmup_seconds < 0:
+        parser.error("air_warmup_seconds 不能小于 0")
+    if args.air_stable_window_frames < 2:
+        parser.error("air_stable_window_frames 必须大于等于 2")
+    if args.air_stable_cv_limit < 0:
+        parser.error("air_stable_cv_limit 不能小于 0")
+    if args.air_stable_slope_limit < 0:
+        parser.error("air_stable_slope_limit 不能小于 0")
+    if args.air_stable_range_limit < 0:
+        parser.error("air_stable_range_limit 不能小于 0")

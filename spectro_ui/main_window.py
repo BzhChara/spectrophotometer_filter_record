@@ -143,10 +143,10 @@ class MainWindow(QMainWindow):
         for wavelength in (410, 460, 520, 550, 590, 630):
             self.wavelength_combo.addItem(f"{wavelength}nm {WAVELENGTH_COLORS[wavelength]}光", wavelength)
 
-        self.ratio_combo = self._create_combo("选择滤光片")
-        self.ratio_combo.setFixedSize(132, 38)
-        for ratio, label in ((0, "空气记录"), (10, "10% 滤光片"), (20, "20% 滤光片"), (30, "30% 滤光片")):
-            self.ratio_combo.addItem(label, ratio)
+        self.mode_combo = self._create_combo("选择模式")
+        self.mode_combo.setFixedSize(132, 38)
+        self.mode_combo.addItem("空气记录", "air")
+        self.mode_combo.addItem("滤光片检测", "filter")
 
         self.group_combo = self._create_combo("选择通道")
         self.group_combo.setFixedSize(132, 38)
@@ -173,7 +173,7 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.port_combo)
         toolbar.addWidget(self.refresh_button)
         toolbar.addWidget(self.wavelength_combo)
-        toolbar.addWidget(self.ratio_combo)
+        toolbar.addWidget(self.mode_combo)
         toolbar.addWidget(self.group_combo)
         toolbar.addWidget(self.start_button)
         toolbar.addWidget(self.stop_button)
@@ -305,27 +305,47 @@ class MainWindow(QMainWindow):
 
     def _load_initial_options(self):
         values = dict(DEFAULT_OPTIONS)
-        values["filter_ratio"] = 30
         config_values = load_config(self.config_path)
         for key, raw_value in config_values.items():
-            if key in ("wavelength", "channel_group", "filter_ratio"):
+            if key in (
+                "wavelength",
+                "channel_group",
+                "filter_stable_window_frames",
+                "air_stable_window_frames",
+            ):
                 values[key] = self._safe_int(raw_value, values[key])
-            elif key in ("ratio_tolerance", "air_tolerance"):
+            elif key in (
+                "filter_stable_cv_limit",
+                "filter_stable_slope_limit",
+                "filter_stable_range_limit",
+                "air_tolerance",
+                "air_warmup_seconds",
+                "air_stable_cv_limit",
+                "air_stable_slope_limit",
+                "air_stable_range_limit",
+            ):
                 values[key] = self._safe_float(raw_value, values[key])
             elif key in ("no_start", "keep_light"):
                 values[key] = self._safe_bool(raw_value, values[key])
+            elif key == "test_mode":
+                normalized = str(raw_value).strip().lower()
+                if normalized in ("air", "filter"):
+                    values[key] = normalized
             elif key in values:
                 values[key] = raw_value
         return values
 
     def _apply_initial_options(self) -> None:
         self._set_combo_by_data(self.wavelength_combo, self.initial_options["wavelength"])
-        self._set_combo_by_data(self.ratio_combo, self.initial_options["filter_ratio"])
+        self._set_combo_by_data(self.mode_combo, self.initial_options["test_mode"])
         self._set_combo_by_data(self.group_combo, self.initial_options["channel_group"])
         port = self.initial_options["port"]
-        if port and self.port_combo.findText(port) < 0:
-            self.port_combo.addItem(port, port)
-        self._set_combo_by_text(self.port_combo, port)
+        if port and self.port_combo.findText(port) >= 0:
+            self._set_combo_by_text(self.port_combo, port)
+        elif port:
+            current = self.port_combo.currentText()
+            fallback = f"，已选择 {current}" if current else ""
+            self._append_log(f"配置串口 {port} 当前不可用{fallback}")
         self._refresh_idle_summary()
 
     def _handle_group_changed(self, text: str) -> None:
@@ -343,16 +363,24 @@ class MainWindow(QMainWindow):
         self.port_combo.clear()
         for port in ports:
             self.port_combo.addItem(port, port)
-        if current and self.port_combo.findText(current) < 0:
-            self.port_combo.addItem(current, current)
-        if ports or current:
-            self._set_combo_by_text(self.port_combo, current or ports[0])
+        if current in ports:
+            self._set_combo_by_text(self.port_combo, current)
+        elif current:
+            self._append_log(f"原串口 {current} 已不可用")
         self._append_log(f"已刷新串口: {', '.join(ports) if ports else '未发现串口'}")
 
     def _start_test(self) -> None:
         port = self.port_combo.currentText().strip()
         if not port:
             self._set_status("状态：请选择串口")
+            return
+
+        available_ports = list_serial_port_names()
+        if port not in available_ports:
+            available_text = ", ".join(available_ports) if available_ports else "无"
+            self._set_status(f"状态：串口 {port} 当前不可用，请重新选择")
+            self._append_log(f"无法开始测试: 串口 {port} 当前不存在；当前可用串口: {available_text}")
+            self._refresh_ports()
             return
 
         self.active_channel_indices = channel_indices(self.group_combo.currentData())
@@ -362,11 +390,19 @@ class MainWindow(QMainWindow):
             port=port,
             wavelength=self.wavelength_combo.currentData(),
             channel_group=self.group_combo.currentData(),
-            filter_ratio=self.ratio_combo.currentData(),
+            test_mode=self.mode_combo.currentData(),
             output=self.initial_options["output"],
             stable_output=self.initial_options["stable_output"],
-            ratio_tolerance=float(self.initial_options["ratio_tolerance"]),
+            filter_stable_window_frames=int(self.initial_options["filter_stable_window_frames"]),
+            filter_stable_cv_limit=float(self.initial_options["filter_stable_cv_limit"]),
+            filter_stable_slope_limit=float(self.initial_options["filter_stable_slope_limit"]),
+            filter_stable_range_limit=float(self.initial_options["filter_stable_range_limit"]),
             air_tolerance=float(self.initial_options["air_tolerance"]),
+            air_warmup_seconds=float(self.initial_options["air_warmup_seconds"]),
+            air_stable_window_frames=int(self.initial_options["air_stable_window_frames"]),
+            air_stable_cv_limit=float(self.initial_options["air_stable_cv_limit"]),
+            air_stable_slope_limit=float(self.initial_options["air_stable_slope_limit"]),
+            air_stable_range_limit=float(self.initial_options["air_stable_range_limit"]),
             no_start=bool(self.initial_options["no_start"]),
             keep_light=bool(self.initial_options["keep_light"]),
         )
@@ -385,7 +421,7 @@ class MainWindow(QMainWindow):
 
         self._set_running(True)
         self._append_log(
-            f"开始测试: {port}, {config.wavelength}nm, 滤光片 {config.filter_ratio}%, "
+            f"开始测试: {port}, {config.wavelength}nm, 模式 {self.mode_combo.currentText()}, "
             f"通道组 {self.group_combo.currentText()}"
         )
         self.worker.start()
@@ -409,7 +445,7 @@ class MainWindow(QMainWindow):
         self.port_combo.setEnabled(not running)
         self.refresh_button.setEnabled(not running)
         self.wavelength_combo.setEnabled(not running)
-        self.ratio_combo.setEnabled(not running)
+        self.mode_combo.setEnabled(not running)
         self.group_combo.setEnabled(not running)
 
     def _handle_values(self, values: list[float]) -> None:
@@ -428,9 +464,21 @@ class MainWindow(QMainWindow):
     def _handle_channel_state(self, idx: int, state: str) -> None:
         self.channel_cards[idx].set_state(state)
 
-    def _handle_stable_value(self, idx: int, value: float, ratio_percent: float) -> None:
+    def _handle_stable_value(
+        self,
+        idx: int,
+        value: float,
+        calibrated_value: float,
+        ratio_percent: float,
+        absorbance: float,
+    ) -> None:
         self.channel_cards[idx].set_stable(value)
-        self._set_status(f"状态：CH{idx + 1} 稳定 {value:.6f}，比例 {ratio_percent:.2f}%")
+        self.channel_cards[idx].set_calibrated(calibrated_value)
+        self.channel_cards[idx].set_absorbance(absorbance)
+        self._set_status(
+            f"状态：CH{idx + 1} 稳定 {value:.6f}，校准 {calibrated_value:.6f}，"
+            f"比例 {ratio_percent:.2f}%，吸光度 {absorbance:.6f}"
+        )
 
     def _handle_row_status(self, rows: int, stable_count: int) -> None:
         self._set_summary(rows, stable_count)
@@ -443,7 +491,7 @@ class MainWindow(QMainWindow):
 
     def _handle_output_paths(self, raw_path: str, stable_path: str) -> None:
         self._append_log(f"原始数据文件: {raw_path}")
-        if self.ratio_combo.currentData() != 0:
+        if self.mode_combo.currentData() == "filter":
             self._append_log(f"稳定值文件: {stable_path}")
 
     def _reset_cards(self) -> None:

@@ -390,13 +390,15 @@ class ChannelCard(AnimatedButtonMixin, QPushButton):
         self.setObjectName("ledCard")
         self.setCursor(Qt.ArrowCursor)
         self.setCheckable(False)
-        self.setMinimumSize(132, 104)
+        self.setMinimumSize(132, 132)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._hovered = False
         self._state = "idle"
         self._value: float | None = None
         self._baseline: float | None = None
         self._stable: float | None = None
+        self._calibrated: float | None = None
+        self._absorbance: float | None = None
         self._shadow = apply_shadow(self, blur_radius=18, y_offset=4, alpha=22)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self._init_button_animation()
@@ -444,11 +446,21 @@ class ChannelCard(AnimatedButtonMixin, QPushButton):
         self._stable = value
         self.update()
 
+    def set_calibrated(self, value: float | None) -> None:
+        self._calibrated = value
+        self.update()
+
+    def set_absorbance(self, value: float | None) -> None:
+        self._absorbance = value
+        self.update()
+
     def reset_measurement(self) -> None:
         self._state = "idle"
         self._value = None
         self._baseline = None
         self._stable = None
+        self._calibrated = None
+        self._absorbance = None
         self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt 事件函数沿用 Qt 命名。
@@ -502,6 +514,8 @@ class ChannelCard(AnimatedButtonMixin, QPushButton):
         value_text = "--" if self._value is None else f"{self._value:.6f}"
         baseline_text = "--" if self._baseline is None else f"{self._baseline:.6f}"
         stable_text = "--" if self._stable is None else f"{self._stable:.6f}"
+        calibrated_text = "--" if self._calibrated is None else f"{self._calibrated:.6f}"
+        absorbance_text = "--" if self._absorbance is None else f"{self._absorbance:.6f}"
 
         painter.setPen(QColor("#0f172a"))
         painter.setFont(title_font)
@@ -512,5 +526,7 @@ class ChannelCard(AnimatedButtonMixin, QPushButton):
 
         painter.setFont(info_font)
         painter.setPen(QColor("#475569"))
-        painter.drawText(text_rect.adjusted(12, text_rect.height() * 0.58, -12, -24), Qt.AlignLeft | Qt.AlignTop, f"基底 {baseline_text}")
-        painter.drawText(text_rect.adjusted(12, text_rect.height() * 0.76, -12, -8), Qt.AlignLeft | Qt.AlignTop, f"稳定 {stable_text}")
+        painter.drawText(text_rect.adjusted(12, text_rect.height() * 0.46, -12, -50), Qt.AlignLeft | Qt.AlignTop, f"基底 {baseline_text}")
+        painter.drawText(text_rect.adjusted(12, text_rect.height() * 0.59, -12, -34), Qt.AlignLeft | Qt.AlignTop, f"稳定 {stable_text}")
+        painter.drawText(text_rect.adjusted(12, text_rect.height() * 0.72, -12, -18), Qt.AlignLeft | Qt.AlignTop, f"校准 {calibrated_text}")
+        painter.drawText(text_rect.adjusted(12, text_rect.height() * 0.85, -12, -2), Qt.AlignLeft | Qt.AlignTop, f"吸光度 {absorbance_text}")
